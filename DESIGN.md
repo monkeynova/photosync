@@ -102,11 +102,52 @@ Each unique photo is represented by a single metadata file in the git repository
 }
 ```
 
-### Repository Structure
+### Two-Repository Architecture
+
+#### Code Repository (Public)
 ```
-/
+photo-sync-tool/
 ├── README.md
 ├── DESIGN.md (this document)
+├── LICENSE
+├── requirements.txt
+├── setup.py
+├── src/
+│   ├── photosync/
+│   │   ├── __init__.py
+│   │   ├── cli.py
+│   │   ├── services/
+│   │   │   ├── __init__.py
+│   │   │   ├── google_photos.py
+│   │   │   ├── flickr.py
+│   │   │   └── base.py
+│   │   ├── models/
+│   │   │   ├── __init__.py
+│   │   │   ├── photo.py
+│   │   │   └── sync_state.py
+│   │   ├── storage/
+│   │   │   ├── __init__.py
+│   │   │   ├── local.py
+│   │   │   └── cloud.py
+│   │   └── utils/
+│   │       ├── __init__.py
+│   │       ├── hashing.py
+│   │       └── dedup.py
+├── tests/
+├── docs/
+├── examples/
+│   ├── config-template.json
+│   └── getting-started.md
+└── schemas/
+    ├── photo-metadata.schema.json
+    └── service-config.schema.json
+```
+
+#### Metadata Repository (Private)
+```
+my-photo-metadata/
+├── README.md
+├── .gitignore
 ├── photos/
 │   ├── 2024/
 │   │   ├── 01/
@@ -118,16 +159,13 @@ Each unique photo is represented by a single metadata file in the git repository
 │   ├── services.json
 │   ├── sync-state.json
 │   └── user-preferences.json
-├── schemas/
-│   ├── photo-metadata.schema.json
-│   └── service-config.schema.json
 ├── blobs/
 │   ├── 2024/
 │   │   └── 01/
 │   │       ├── photo-uuid-1-sha256hash.jpg
 │   │       └── photo-uuid-2-sha256hash.jpg
-└── src/
-    └── (implementation code)
+└── logs/
+    └── sync-history.log
 ```
 
 ## Workflow Design
@@ -159,6 +197,12 @@ Each unique photo is represented by a single metadata file in the git repository
 ### CLI Workflow Examples
 
 ```bash
+# Initialize metadata repository (one-time setup)
+photosync init ~/my-photo-metadata
+
+# Set metadata repository path (or use --metadata-repo flag)
+export PHOTOSYNC_METADATA_REPO=~/my-photo-metadata
+
 # Discover new photos from all services
 photosync discover --since last-week
 
@@ -185,6 +229,9 @@ photosync status
 
 # Check for visibility discrepancies
 photosync audit --visibility-check
+
+# Work with different metadata repo
+photosync --metadata-repo /path/to/other/repo status
 ```
 
 ## Service Integration Strategy
@@ -255,20 +302,22 @@ Choice [1-5]: 3
 ## Implementation Plan
 
 ### Phase 1: Foundation (MVP)
-**Goal**: Basic discovery and metadata management
+**Goal**: Basic discovery and metadata management with two-repository architecture
 **Duration**: 2-3 weeks
 
 **Tasks**:
-1. Set up project structure and git repository
-2. Implement photo metadata schema and validation
-3. Create CLI framework with basic commands
-4. Implement Google Photos API integration (read-only)
-5. Implement Flickr API integration (read-only)
-6. Build content hash generation and duplicate detection
-7. Create basic discovery workflow (`photosync discover`)
+1. Set up public code repository structure with proper Python packaging
+2. Implement metadata repository initialization and management
+3. Create CLI framework with metadata repo path handling
+4. Implement photo metadata schema and validation
+5. Implement Google Photos API integration (read-only)
+6. Implement Flickr API integration (read-only)
+7. Build content hash generation and duplicate detection
+8. Create basic discovery workflow (`photosync discover`)
 
 **Deliverables**:
-- Working CLI that can scan services and create metadata files
+- Public code repository ready for community use
+- Working CLI that can initialize and work with private metadata repos
 - Git repository with discovered photos as JSON files
 - Basic deduplication logic
 
@@ -399,17 +448,33 @@ mypy   # Type checking
 ```
 
 ### Initial Setup Commands
+
 ```bash
-git init photo-sync-system
-cd photo-sync-system
-mkdir -p {photos,config,schemas,blobs,src,tests}
-touch README.md DESIGN.md .gitignore
-pip install -r requirements.txt
+# Set up the code repository (public)
+git clone https://github.com/yourname/photo-sync-tool
+cd photo-sync-tool
+pip install -e .
+
+# Set up your private metadata repository
+mkdir ~/my-photo-metadata
+cd ~/my-photo-metadata
+git init
+photosync init .  # Creates directory structure and templates
+git add .
+git commit -m "Initial metadata repository setup"
+
+# Add private remote (GitHub private repo, self-hosted Git, etc.)
+git remote add origin git@github.com:yourname/my-photo-metadata-private.git
+git push -u origin main
+
+# Configure your environment
+export PHOTOSYNC_METADATA_REPO=~/my-photo-metadata
+# Or add to ~/.bashrc or ~/.zshrc for persistence
 ```
 
 ## Configuration Management
 
-### Service Configuration (`config/services.json`)
+### Service Configuration (`metadata-repo/config/services.json`)
 ```json
 {
   "google-photos": {
@@ -427,7 +492,7 @@ pip install -r requirements.txt
 }
 ```
 
-### User Preferences (`config/user-preferences.json`)
+### User Preferences (`metadata-repo/config/user-preferences.json`)
 ```json
 {
   "default_visibility": "private",
@@ -444,6 +509,18 @@ pip install -r requirements.txt
     "incremental_sync_days": 30
   }
 }
+```
+
+### Environment Configuration
+```bash
+# Required environment variable
+export PHOTOSYNC_METADATA_REPO=/path/to/your/metadata/repo
+
+# Optional: Override config location
+export PHOTOSYNC_CONFIG_PATH=/custom/config/path
+
+# Optional: Enable debug logging
+export PHOTOSYNC_LOG_LEVEL=DEBUG
 ```
 
 ## Success Metrics
