@@ -102,11 +102,11 @@ Each unique photo is represented by a single metadata file in the git repository
 }
 ```
 
-### Two-Repository Architecture
+### Two-Repository Architecture with Git Submodule
 
 #### Code Repository (Public)
 ```
-photo-sync-tool/
+photosync/
 ├── README.md
 ├── DESIGN.md (this document)
 ├── LICENSE
@@ -143,11 +143,14 @@ photo-sync-tool/
     └── service-config.schema.json
 ```
 
-#### Metadata Repository (Private)
+#### Metadata Repository (Private) with Submodule
 ```
 my-photo-metadata/
 ├── README.md
 ├── .gitignore
+├── .gitmodules
+├── photosync/                    # Git submodule (public code)
+│   └── (contents of public repo)
 ├── photos/
 │   ├── 2024/
 │   │   ├── 01/
@@ -164,8 +167,10 @@ my-photo-metadata/
 │   │   └── 01/
 │   │       ├── photo-uuid-1-sha256hash.jpg
 │   │       └── photo-uuid-2-sha256hash.jpg
-└── logs/
-    └── sync-history.log
+├── logs/
+│   └── sync-history.log
+└── bin/
+    └── photosync -> ../photosync/src/photosync/cli.py
 ```
 
 ## Workflow Design
@@ -197,41 +202,40 @@ my-photo-metadata/
 ### CLI Workflow Examples
 
 ```bash
-# Initialize metadata repository (one-time setup)
-photosync init ~/my-photo-metadata
-
-# Set metadata repository path (or use --metadata-repo flag)
-export PHOTOSYNC_METADATA_REPO=~/my-photo-metadata
+# All commands run from within the metadata repository
+cd ~/my-photo-metadata
 
 # Discover new photos from all services
-photosync discover --since last-week
+./bin/photosync discover --since last-week
 
-# Discover from specific service
-photosync discover --service google-photos --since 2024-01-01
+# Discover from specific service  
+./bin/photosync discover --service google-photos --since 2024-01-01
 
 # Full discovery scan (ignores last-sync timestamps)
-photosync discover --full-scan
+./bin/photosync discover --full-scan
 
 # Review and resolve conflicts interactively  
-photosync resolve --interactive
+./bin/photosync resolve --interactive
 
 # Batch resolve simple conflicts automatically
-photosync resolve --auto-resolve simple
+./bin/photosync resolve --auto-resolve simple
 
 # Preview replication actions
-photosync replicate --dry-run
+./bin/photosync replicate --dry-run
 
 # Execute replication
-photosync replicate --execute
+./bin/photosync replicate --execute
 
 # Show sync status and statistics
-photosync status
+./bin/photosync status
 
 # Check for visibility discrepancies
-photosync audit --visibility-check
+./bin/photosync audit --visibility-check
 
-# Work with different metadata repo
-photosync --metadata-repo /path/to/other/repo status
+# Update the photosync code to latest version
+git submodule update --remote photosync
+git add photosync
+git commit -m "Update photosync to latest version"
 ```
 
 ## Service Integration Strategy
@@ -450,26 +454,65 @@ mypy   # Type checking
 ### Initial Setup Commands
 
 ```bash
-# Set up the code repository (public)
-git clone https://github.com/yourname/photo-sync-tool
-cd photo-sync-tool
-pip install -e .
-
-# Set up your private metadata repository
+# Set up your private metadata repository with submodule
 mkdir ~/my-photo-metadata
 cd ~/my-photo-metadata
 git init
-photosync init .  # Creates directory structure and templates
-git add .
-git commit -m "Initial metadata repository setup"
 
-# Add private remote (GitHub private repo, self-hosted Git, etc.)
+# Add the public photosync repository as a submodule
+git submodule add https://github.com/yourname/photosync.git photosync
+
+# Initialize the metadata repository structure
+mkdir -p {photos,config,blobs,logs,bin}
+mkdir -p photos/{2024,2023}
+mkdir -p blobs/{2024,2023}
+
+# Create symlink for easy CLI access
+ln -sf ../photosync/src/photosync/cli.py bin/photosync
+chmod +x bin/photosync
+
+# Copy configuration templates from the public repo
+cp photosync/examples/config-template.json config/services.json
+cp photosync/examples/user-preferences-template.json config/user-preferences.json
+
+# Create .gitignore for private data
+cat > .gitignore << EOF
+# Ignore actual photo blobs (too large for git)
+blobs/**/*.jpg
+blobs/**/*.jpeg
+blobs/**/*.png
+blobs/**/*.tiff
+blobs/**/*.raw
+
+# Ignore logs
+logs/*.log
+
+# Ignore sensitive config with API keys
+config/services.json
+
+# Keep directory structure
+!blobs/*/.gitkeep
+!logs/.gitkeep
+EOF
+
+# Create directory keeper files
+touch blobs/2024/.gitkeep blobs/2023/.gitkeep logs/.gitkeep
+
+# Initial commit
+git add .
+git commit -m "Initial metadata repository setup with photosync submodule"
+
+# Add private remote and push
 git remote add origin git@github.com:yourname/my-photo-metadata-private.git
 git push -u origin main
 
-# Configure your environment
-export PHOTOSYNC_METADATA_REPO=~/my-photo-metadata
-# Or add to ~/.bashrc or ~/.zshrc for persistence
+# Install Python dependencies (from submodule)
+cd photosync
+pip install -e .
+cd ..
+
+# Test the setup
+./bin/photosync --help
 ```
 
 ## Configuration Management
@@ -512,15 +555,18 @@ export PHOTOSYNC_METADATA_REPO=~/my-photo-metadata
 ```
 
 ### Environment Configuration
-```bash
-# Required environment variable
-export PHOTOSYNC_METADATA_REPO=/path/to/your/metadata/repo
 
-# Optional: Override config location
-export PHOTOSYNC_CONFIG_PATH=/custom/config/path
+The photosync CLI automatically detects its execution context:
 
-# Optional: Enable debug logging
-export PHOTOSYNC_LOG_LEVEL=DEBUG
+```python
+# CLI detects metadata repo by finding itself relative to current directory
+# When run as ./bin/photosync, it knows metadata repo is parent directory
+# When run as python -m photosync, it requires --metadata-repo argument
+
+# No environment variables needed for normal operation
+# Optional environment variables for advanced usage:
+export PHOTOSYNC_LOG_LEVEL=DEBUG    # Enable debug logging
+export PHOTOSYNC_API_TIMEOUT=30     # API request timeout in seconds
 ```
 
 ## Success Metrics
