@@ -32,7 +32,8 @@ setup(
         "jsonschema>=4.0.0",
         
         # API integrations (will add as we implement)
-        # "google-api-python-client",
+        "google-api-python-client>=2.0.0",
+        "google-auth-oauthlib>=0.7.0", # For Google OAuth flow
         # "flickrapi",
     ],
     
