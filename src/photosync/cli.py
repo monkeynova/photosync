@@ -7,14 +7,33 @@ import argparse
 import json
 import os
 import sys
-from pathlib import Path
-from datetime import datetime
 import logging
+from pathlib import Path
+from datetime import datetime, timezone, timedelta
+from typing import Optional, Dict, Any, List
+
+from dateutil import parser as date_parser
+
+from .models.photo_manager import PhotoManager
+from .models.photo import Photo # Though Photo objects are yielded by services
+from .services.google_photos import GooglePhotosService
+# from .services.flickr import FlickrService # Future
+
+
+SERVICE_ADAPTERS = {
+    "google-photos": GooglePhotosService,
+    # "flickr": FlickrService, # Add when Flickr is implemented
+}
 
 class PhotoSyncCLI:
     def __init__(self):
         self.metadata_repo_path = self._detect_metadata_repo()
         self.setup_logging()
+        self.photo_manager: Optional[PhotoManager] = None
+        if self.metadata_repo_path:
+            self.photo_manager = PhotoManager(self.metadata_repo_path)
+            if not self.photo_manager.load_schema():
+                self.logger.warning("Could not load photo metadata schema. Validation will be disabled.")
     
     def _detect_metadata_repo(self):
         """
@@ -282,6 +301,131 @@ config/services.json
             info.append(f"❌ Error reading sync state: {e}")
         
         return info
+    
+    def _parse_since_arg(self, since_str: Optional[str]) -> Optional[datetime]:
+        if not since_str:
+            return None
+        now = datetime.now(timezone.utc)
+        try:
+            if since_str.lower() == "today":
+                return now.replace(hour=0, minute=0, second=0, microsecond=0)
+            elif since_str.lower() == "yesterday":
+                return (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            elif since_str.lower() == "last-week":
+                return (now - timedelta(weeks=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            
+            dt = date_parser.parse(since_str)
+            if dt.tzinfo is None: # Make it timezone-aware (assume UTC if not specified)
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except ValueError:
+            self.logger.error(f"Invalid --since format: {since_str}. Use YYYY-MM-DD, 'today', 'yesterday', or 'last-week'.")
+            return None
+
+    def discover_photos(self, service_name_arg: Optional[str], since_arg: Optional[str], full_scan_arg: bool):
+        """Discover new photos from configured services."""
+        if not self.metadata_repo_path:
+            print("❌ No metadata repository found. Cannot discover photos.")
+            print("Run 'photosync init' or cd to an existing metadata repository.")
+            return
+
+        if not self.photo_manager:
+            self.logger.error("PhotoManager not initialized. Cannot proceed with discovery.")
+            return
+
+        self.logger.info("Starting photo discovery process...")
+
+        # Load configurations
+        services_config_path = self.metadata_repo_path / "config" / "services.json"
+        sync_state_path = self.metadata_repo_path / "config" / "sync-state.json"
+
+        try:
+            services_config = json.loads(services_config_path.read_text()) if services_config_path.exists() else {}
+            sync_state = json.loads(sync_state_path.read_text()) if sync_state_path.exists() else {}
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Error reading configuration files: {e}")
+            return
+
+        services_to_process: List[str] = []
+        if service_name_arg:
+            if service_name_arg in services_config and services_config[service_name_arg].get("enabled"):
+                services_to_process.append(service_name_arg)
+            else:
+                self.logger.error(f"Service '{service_name_arg}' is not configured or not enabled.")
+                return
+        else:
+            services_to_process = [
+                name for name, config in services_config.items() if config.get("enabled")
+            ]
+
+        if not services_to_process:
+            self.logger.info("No services enabled or specified for discovery.")
+            return
+
+        overall_discovered_count = 0
+        processed_any_service = False
+
+        for service_name in services_to_process:
+            self.logger.info(f"Discovering photos from {service_name}...")
+            service_conf = services_config.get(service_name, {})
+            adapter_class = SERVICE_ADAPTERS.get(service_name)
+
+            if not adapter_class:
+                self.logger.warning(f"No adapter found for service: {service_name}. Skipping.")
+                continue
+
+            last_sync_time: Optional[datetime] = None
+            if full_scan_arg:
+                self.logger.info(f"Performing full scan for {service_name} (ignoring last sync time).")
+                last_sync_time = None
+            elif since_arg:
+                last_sync_time = self._parse_since_arg(since_arg)
+                if last_sync_time:
+                    self.logger.info(f"Discovering photos since {last_sync_time.isoformat()} for {service_name}.")
+                else: # Parsing failed
+                    self.logger.warning(f"Could not parse --since argument for {service_name}, proceeding without time filter for this service unless full_scan is also specified.")
+                    if not full_scan_arg: # if full_scan is true, last_sync_time is already None
+                        last_sync_time = None 
+            else:
+                service_sync_state = sync_state.get("services", {}).get(service_name, {})
+                last_discovery_str = service_sync_state.get("last_discovery")
+                if last_discovery_str:
+                    try:
+                        last_sync_time = datetime.fromisoformat(last_discovery_str)
+                        self.logger.info(f"Resuming discovery for {service_name} from {last_sync_time.isoformat()}.")
+                    except ValueError:
+                        self.logger.warning(f"Invalid last_discovery format for {service_name}: {last_discovery_str}. Performing full scan for this service.")
+                        last_sync_time = None
+                else:
+                    self.logger.info(f"No previous discovery time found for {service_name}. Performing initial scan.")
+                    last_sync_time = None
+            
+            adapter = adapter_class(service_conf, self.metadata_repo_path)
+            discovered_for_service = 0
+            try:
+                for photo_obj in adapter.discover_photos(last_sync_time=last_sync_time):
+                    self.logger.debug(f"Discovered: {photo_obj.metadata.filename or photo_obj.photo_id} from {service_name}")
+                    # Content hashing would go here in a later phase
+                    if self.photo_manager.save_photo(photo_obj):
+                        discovered_for_service += 1
+                    else:
+                        self.logger.error(f"Failed to save photo {photo_obj.photo_id} from {service_name}")
+                self.logger.info(f"Discovered {discovered_for_service} photos from {service_name}.")
+                overall_discovered_count += discovered_for_service
+                
+                # Update sync state for this service
+                sync_state.setdefault("services", {}).setdefault(service_name, {})["last_discovery"] = datetime.now(timezone.utc).isoformat()
+                sync_state.setdefault("services", {}).setdefault(service_name, {})["last_discovered_count"] = discovered_for_service
+                processed_any_service = True
+            except Exception as e:
+                self.logger.error(f"Error discovering photos from {service_name}: {e}", exc_info=True)
+
+        if processed_any_service:
+            sync_state["last_discovery"] = datetime.now(timezone.utc).isoformat()
+            sync_state_path.write_text(json.dumps(sync_state, indent=2))
+            self.logger.info(f"Discovery process finished. Total photos discovered in this run: {overall_discovered_count}.")
+        else:
+            self.logger.info("Discovery process finished. No services were processed or no new photos found.")
 
 def main():
     parser = argparse.ArgumentParser(
@@ -292,7 +436,8 @@ Examples:
   photosync init                    # Initialize metadata repository in current directory
   photosync init /path/to/repo      # Initialize metadata repository at specific path
   photosync status                  # Show current status
-  photosync --metadata-repo /path   # Specify metadata repository path
+  photosync discover                # Discover photos from all enabled services
+  photosync discover --service google-photos --since 2024-01-01
         """
     )
     
@@ -309,6 +454,12 @@ Examples:
     # Status command
     status_parser = subparsers.add_parser('status', help='Show current status')
     
+    # Discover command
+    discover_parser = subparsers.add_parser('discover', help='Discover new photos from services')
+    discover_parser.add_argument('--service', help='Discover from a specific service (e.g., google-photos)')
+    discover_parser.add_argument('--since', help="Discover photos since a specific date/time (e.g., '2024-01-01', 'yesterday', 'last-week')")
+    discover_parser.add_argument('--full-scan', action='store_true', help='Perform a full scan, ignoring last sync timestamps')
+
     args = parser.parse_args()
     
     # Handle --metadata-repo override
@@ -321,6 +472,8 @@ Examples:
         cli.init_metadata_repo(args.path)
     elif args.command == 'status':
         cli.show_status()
+    elif args.command == 'discover':
+        cli.discover_photos(service_name_arg=args.service, since_arg=args.since, full_scan_arg=args.full_scan)
     else:
         parser.print_help()
 

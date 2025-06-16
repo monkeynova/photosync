@@ -30,6 +30,7 @@ setup(
         # Data processing
         "pillow>=9.0.0",
         "jsonschema>=4.0.0",
+        "python-dateutil>=2.8.0", # For parsing date strings
         
         # API integrations (will add as we implement)
         "google-api-python-client>=2.0.0",
