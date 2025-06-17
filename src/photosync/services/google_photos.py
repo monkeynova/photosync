@@ -19,7 +19,10 @@ from ..models.photo import Photo, ServiceInstance, PhotoMetadata, PhotoQuality, 
 
 logger = logging.getLogger(__name__)
 
-SCOPES = ['https://www.googleapis.com/auth/photoslibrary.readonly']
+# Original scope:
+# SCOPES = ['https://www.googleapis.com/auth/photoslibrary.readonly']
+# Broader scope for testing:
+SCOPES = ['https://www.googleapis.com/auth/photoslibrary']
 DEFAULT_TOKEN_FILE = "google_auth_token.json"
 
 class GooglePhotosService(BaseServiceAdapter):
@@ -55,6 +58,8 @@ class GooglePhotosService(BaseServiceAdapter):
                 try:
                     logger.info("Refreshing Google Photos API token.")
                     creds.refresh(Request())
+                    if creds and creds.valid: # Log scopes after successful refresh
+                        logger.info(f"Credentials refreshed successfully. Scopes: {creds.scopes}")
                 except Exception as e:
                     logger.error(f"Failed to refresh token: {e}. Initiating new login.")
                     creds = None # Force new login
@@ -82,12 +87,16 @@ class GooglePhotosService(BaseServiceAdapter):
                     self.token_path.parent.mkdir(parents=True, exist_ok=True)
                     with open(self.token_path, 'w') as token_file:
                         token_file.write(creds.to_json())
-                    logger.info(f"Google Photos API token saved to {self.token_path}")
+                    logger.info(f"Google Photos API token saved to {self.token_path}. Scopes in new token: {creds.scopes}")
                 except Exception as e:
                     logger.error(f"Failed to save token to {self.token_path}: {e}")
             else:
                 logger.error("Failed to obtain Google Photos API credentials.")
                 return None
+        
+        if creds and creds.valid: # Log scopes if loaded from file and valid
+            logger.info(f"Using existing valid credentials. Scopes: {creds.scopes}")
+            
         return creds
 
     def _parse_item_to_photo(self, item_data: Dict[str, Any]) -> Photo:
@@ -144,7 +153,7 @@ class GooglePhotosService(BaseServiceAdapter):
             return
 
         try:
-            service = build('photoslibrary', 'v1', credentials=creds, static_discovery=False)
+            service = build('photoslibrary', 'v1', credentials=creds, static_discovery=False, cache_discovery=False)
             page_token = None
             
             search_body: Dict[str, Any] = {"pageSize": 100} # Max 100

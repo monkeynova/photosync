@@ -241,4 +241,22 @@ class PhotoManager:
         return None
     
     def delete_photo(self, photo_id: str) -> bool:
-        """Delete a
+        """Delete a photo's metadata file and remove it from the cache.
+        Returns True if successful, False otherwise.
+        """
+        photo_file_path = self.get_photo_file_path(photo_id)
+        
+        if photo_file_path and photo_file_path.exists():
+            try:
+                photo_file_path.unlink()
+                logger.info(f"Deleted photo metadata file: {photo_file_path}")
+                if photo_id in self._photo_cache:
+                    del self._photo_cache[photo_id]
+                    logger.debug(f"Removed photo {photo_id} from cache.")
+                return True
+            except Exception as e:
+                logger.error(f"Error deleting photo file {photo_file_path}: {e}")
+                return False
+        else:
+            logger.warning(f"Photo metadata file for {photo_id} not found. Cannot delete.")
+            return False
